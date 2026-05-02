@@ -68,6 +68,99 @@ For Windows, you can download it from [oracle.com](https://www.oracle.com/java/t
   flatpak install flathub com.github.skylot.jadx
   ```
 
+### jadx-mcp — MCP Server for AI Tooling
+
+This fork adds a `jadx-mcp` module that runs jadx as a [Model Context Protocol](https://modelcontextprotocol.io) server over stdio, letting AI tools like [Cursor](https://cursor.sh) decompile and explore Android apps through natural language.
+
+#### Build
+
+Requires JDK 17+.
+
+```bash
+git clone https://github.com/EmorrowD/jadx.git
+cd jadx
+./gradlew :jadx-mcp:installDist
+```
+
+The server binary lands at `jadx-mcp/build/install/jadx-mcp/bin/jadx-mcp` (or `.bat` on Windows).
+
+#### Setup in Cursor
+
+Add the following to your `~/.cursor/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "jadx-mcp": {
+      "type": "stdio",
+      "command": "C:\\Program Files\\Java\\jdk-23\\bin\\java.exe",
+      "args": [
+        "-cp",
+        "/path/to/jadx/jadx-mcp/build/install/jadx-mcp/lib/*",
+        "jadx.mcp.JadxMcpMain"
+      ]
+    }
+  }
+}
+```
+
+Replace `/path/to/jadx` with the absolute path to your cloned repo, and update the Java path to match your installation. On Windows, use double backslashes in the `args` path.
+
+Restart Cursor after editing `mcp.json`.
+
+#### Usage
+
+Once connected, ask Cursor to use the `jadx-mcp` server in chat. Example prompts:
+
+```
+Open a jadx session for /path/to/app.apk and list all packages.
+```
+```
+Get the source for class com.example.MainActivity.
+```
+```
+Search the decompiled code for "api_key".
+```
+```
+Find all usages of class com.example.network.ApiClient.
+```
+```
+Decode AndroidManifest.xml from the session.
+```
+
+#### Available Tools
+
+| Tool | Description |
+|---|---|
+| `session_open` | Load an APK, DEX, JAR, AAB, XAPK, or SMALI file |
+| `session_close` | Close a session and free resources |
+| `session_info` | Get session metadata and counts |
+| `list_classes` | List classes with optional name/package filter |
+| `get_class_source` | Get decompiled Java source for a class |
+| `get_class_smali` | Get disassembled smali for a class |
+| `get_method_source` | Get source for a single method |
+| `resolve_symbol` | Find classes, methods, or fields by name |
+| `find_usages` | Find all usages of a class, method, or field |
+| `find_method_calls` | Get incoming and outgoing calls for a method |
+| `search_code` | Full-text or regex search over decompiled source |
+| `search_symbols` | Search class/method/field symbol names |
+| `list_resources` | List all resources in the loaded file |
+| `get_resource_content` | Decode resource content (XML, ARSC, etc.) |
+| `get_errors_report` | Get decompilation errors and warnings |
+| `export_project` | Export sources and resources to disk |
+| `list_plugins` | List active jadx plugins |
+| `list_plugin_options` | Show plugin options and defaults |
+| `set_plugin_option` | Set a plugin option and reload passes |
+| `plugins_install` | Install an external jadx plugin |
+| `plugins_update_all` | Update all installed external plugins |
+| `plugins_uninstall` | Uninstall an external jadx plugin |
+
+#### Supported Input Formats
+
+`.apk` `.dex` `.jar` `.class` `.aar` `.aab` `.xapk` `.apkm` `.apks` `.smali` `.zip` `.arsc`
+
+---
+
 ### Use jadx as a library
 You can use jadx in your java projects, check details on [wiki page](https://github.com/skylot/jadx/wiki/Use-jadx-as-a-library)
 
