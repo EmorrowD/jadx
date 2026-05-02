@@ -43,3 +43,6 @@ quark.json
 
 cliff.toml
 jadx-gui/src/main/resources/logback.xml
+
+run-jadx-mcp.cmd
+jadx-mcp-trace.log
