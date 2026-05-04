@@ -116,44 +116,93 @@ Once connected, ask Cursor to use the `jadx-mcp` server in chat. Example prompts
 Open a jadx session for /path/to/app.apk and list all packages.
 ```
 ```
-Get the source for class com.example.MainActivity.
+Get the source for class com.example.MainActivity and all classes it depends on.
 ```
 ```
-Search the decompiled code for "api_key".
+Search the decompiled code for "api_key" and show me the full source of every matching class.
 ```
 ```
-Find all usages of class com.example.network.ApiClient.
+Find the main activity and show me its decompiled source.
 ```
 ```
-Decode AndroidManifest.xml from the session.
+List all classes in the app's own package and show me which ones handle network requests.
 ```
 
 #### Available Tools
+
+**Session management**
 
 | Tool | Description |
 |---|---|
 | `session_open` | Load an APK, DEX, JAR, AAB, XAPK, or SMALI file |
 | `session_close` | Close a session and free resources |
 | `session_info` | Get session metadata and counts |
-| `list_classes` | List classes with optional name/package filter |
-| `get_class_source` | Get decompiled Java source for a class |
+
+**Class and code inspection**
+
+| Tool | Description |
+|---|---|
+| `list_classes` | List classes with optional name/package filter. Supports `offset` pagination, returns `total` and `has_more`. |
+| `get_class_source` | Get decompiled Java source. Pass a single `class_name` or a `class_names` array to batch-fetch multiple classes in one call. |
 | `get_class_smali` | Get disassembled smali for a class |
 | `get_method_source` | Get source for a single method |
-| `resolve_symbol` | Find classes, methods, or fields by name |
-| `find_usages` | Find all usages of a class, method, or field |
+| `get_class_deep` | **Composite.** Returns full source + structured fields + methods + usages + inner classes in one call. Replaces `get_class_source` + `find_usages` + `find_method_calls`. |
+
+**Symbol resolution and search**
+
+| Tool | Description |
+|---|---|
+| `resolve_symbol` | Find classes, methods, or fields by name. Supports `offset` pagination. |
+| `search_symbols` | Search class/method/field symbol names. Supports `offset` pagination and `include_source` to embed full class source in results. |
+| `search_code` | Full-text or regex search over decompiled source. Supports `offset` pagination and `include_source` to embed full class source for every match — collapsing search + fetch into one call. |
+| `search_and_resolve` | **Composite.** Resolves symbols by name and immediately returns their full decompiled class source. Replaces `resolve_symbol` + `get_class_source`. |
+
+**Cross-references**
+
+| Tool | Description |
+|---|---|
+| `find_usages` | Find all usages of a class, method, or field. Supports `limit`/`offset` pagination, returns `total` and `has_more`. |
 | `find_method_calls` | Get incoming and outgoing calls for a method |
-| `search_code` | Full-text or regex search over decompiled source |
-| `search_symbols` | Search class/method/field symbol names |
+
+**Android shortcuts** *(APK/AAB only)*
+
+| Tool | Description |
+|---|---|
+| `get_android_manifest` | Retrieve the decoded `AndroidManifest.xml` directly |
+| `get_main_activity` | Parse the manifest, find the launcher `Activity`, and return its decompiled source — all in one call |
+| `get_app_classes` | List classes belonging to the app's own package (auto-detected from manifest), filtering out known library packages. Supports `include_source`, `limit`, and `offset`. |
+| `get_strings_resource` | Retrieve `res/values/strings.xml` directly — useful for finding hardcoded endpoints, API keys, and secrets |
+
+**Resources**
+
+| Tool | Description |
+|---|---|
 | `list_resources` | List all resources in the loaded file |
 | `get_resource_content` | Decode resource content (XML, ARSC, etc.) |
 | `get_errors_report` | Get decompilation errors and warnings |
 | `export_project` | Export sources and resources to disk |
+
+**Plugins**
+
+| Tool | Description |
+|---|---|
 | `list_plugins` | List active jadx plugins |
 | `list_plugin_options` | Show plugin options and defaults |
 | `set_plugin_option` | Set a plugin option and reload passes |
 | `plugins_install` | Install an external jadx plugin |
 | `plugins_update_all` | Update all installed external plugins |
 | `plugins_uninstall` | Uninstall an external jadx plugin |
+
+#### Pagination
+
+The following tools support `offset` + `limit` parameters for iterating large result sets. Responses include `has_more: true/false` and where applicable a `total` count:
+
+- `list_classes` — also returns `total` (full count of matching classes)
+- `search_code` — returns `has_more`
+- `search_symbols` — returns `has_more`
+- `find_usages` — also returns `total`
+- `resolve_symbol` — returns `has_more`
+- `get_app_classes` — also returns `total`
 
 #### Supported Input Formats
 
