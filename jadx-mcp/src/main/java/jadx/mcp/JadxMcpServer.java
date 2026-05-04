@@ -1,17 +1,27 @@
 package jadx.mcp;
 
 import java.io.File;
+import java.io.StringReader;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Comparator;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+
+import javax.xml.parsers.DocumentBuilder;
+import javax.xml.parsers.DocumentBuilderFactory;
+
+import org.w3c.dom.Document;
+import org.w3c.dom.Element;
+import org.w3c.dom.NodeList;
+import org.xml.sax.InputSource;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
@@ -110,10 +120,28 @@ public class JadxMcpServer {
 				case "search_code":
 					result = toolSearchCode(args);
 					break;
-				case "search_symbols":
-					result = toolSearchSymbols(args);
-					break;
-				case "list_resources":
+			case "search_symbols":
+				result = toolSearchSymbols(args);
+				break;
+			case "get_class_deep":
+				result = toolGetClassDeep(args);
+				break;
+			case "search_and_resolve":
+				result = toolSearchAndResolve(args);
+				break;
+			case "get_android_manifest":
+				result = toolGetAndroidManifest(args);
+				break;
+			case "get_main_activity":
+				result = toolGetMainActivity(args);
+				break;
+			case "get_app_classes":
+				result = toolGetAppClasses(args);
+				break;
+			case "get_strings_resource":
+				result = toolGetStringsResource(args);
+				break;
+			case "list_resources":
 					result = toolListResources(args);
 					break;
 				case "get_resource_content":
@@ -218,11 +246,13 @@ public class JadxMcpServer {
 		String nameQuery = getAsString(argsObj, "name_query", "");
 		boolean regex = getAsBoolean(argsObj, "regex", false);
 		int limit = getAsInt(argsObj, "limit", DEFAULT_LIMIT);
+		int offset = getAsInt(argsObj, "offset", 0);
 		Pattern pattern = buildPattern(nameQuery, regex, getAsBoolean(argsObj, "ignore_case", true));
 
 		synchronized (session) {
 			List<JavaClass> classes = session.listClasses(includeInners);
 			JsonArray list = new JsonArray();
+			int matchIndex = 0;
 			for (JavaClass cls : classes) {
 				if (!packagePrefix.isEmpty() && !cls.getPackage().startsWith(packagePrefix)) {
 					continue;
@@ -230,22 +260,51 @@ public class JadxMcpServer {
 				if (pattern != null && !matchesClass(pattern, cls)) {
 					continue;
 				}
-				list.add(classToJson(cls));
-				if (list.size() >= limit) {
-					break;
+				if (matchIndex >= offset && list.size() < limit) {
+					list.add(classToJson(cls));
 				}
+				matchIndex++;
 			}
 			JsonObject out = new JsonObject();
 			out.add("classes", list);
 			out.addProperty("count", list.size());
+			out.addProperty("total", matchIndex);
+			out.addProperty("offset", offset);
+			out.addProperty("has_more", offset + list.size() < matchIndex);
 			return out;
 		}
 	}
 
 	private JsonObject toolGetClassSource(JsonObject argsObj) {
 		DecompilerSession session = getSession(argsObj);
-		String className = requireString(argsObj, "class_name");
 		String naming = getAsString(argsObj, "naming", "auto");
+		JsonElement classNamesElem = argsObj.get("class_names");
+		if (classNamesElem != null && classNamesElem.isJsonArray()) {
+			JsonArray classNamesArr = classNamesElem.getAsJsonArray();
+			synchronized (session) {
+				JsonArray classes = new JsonArray();
+				for (JsonElement elem : classNamesArr) {
+					String cn = elem.getAsString();
+					JavaClass cls = session.resolveClass(cn, naming);
+					JsonObject item = new JsonObject();
+					if (cls != null) {
+						item.add("class", classToJson(cls));
+						item.addProperty("code", cls.getCode());
+						item.addProperty("found", true);
+					} else {
+						item.addProperty("class_name", cn);
+						item.addProperty("found", false);
+						item.addProperty("error", "Class not found: " + cn);
+					}
+					classes.add(item);
+				}
+				JsonObject out = new JsonObject();
+				out.add("classes", classes);
+				out.addProperty("count", classes.size());
+				return out;
+			}
+		}
+		String className = requireString(argsObj, "class_name");
 		synchronized (session) {
 			JavaClass cls = requireClass(session, className, naming);
 			JsonObject out = new JsonObject();
@@ -292,22 +351,30 @@ public class JadxMcpServer {
 		String query = requireString(argsObj, "query");
 		String kind = getAsString(argsObj, "kind", "all").toLowerCase(Locale.ROOT);
 		int limit = getAsInt(argsObj, "limit", DEFAULT_LIMIT);
+		int offset = getAsInt(argsObj, "offset", 0);
 		boolean ignoreCase = getAsBoolean(argsObj, "ignore_case", true);
 		String cmpQuery = ignoreCase ? query.toLowerCase(Locale.ROOT) : query;
 
 		synchronized (session) {
 			JsonArray matches = new JsonArray();
+			int matchIndex = 0;
 			if ("all".equals(kind) || "class".equals(kind)) {
 				JavaClass exact = session.resolveClass(query, "auto");
 				if (exact != null) {
-					matches.add(classToJson(exact));
+					if (matchIndex >= offset && matches.size() < limit) {
+						matches.add(classToJson(exact));
+					}
+					matchIndex++;
 				}
 				for (JavaClass cls : session.allClasses()) {
 					if (matches.size() >= limit) {
 						break;
 					}
 					if (containsIgnoreCase(cls.getFullName(), cls.getRawName(), cls.getName(), cmpQuery, ignoreCase)) {
-						matches.add(classToJson(cls));
+						if (matchIndex >= offset) {
+							matches.add(classToJson(cls));
+						}
+						matchIndex++;
 					}
 				}
 			}
@@ -322,7 +389,10 @@ public class JadxMcpServer {
 						}
 						if (containsIgnoreCase(method.getFullName(), method.getName(),
 								method.getMethodNode().getMethodInfo().getShortId(), cmpQuery, ignoreCase)) {
-							matches.add(methodToJson(method));
+							if (matchIndex >= offset) {
+								matches.add(methodToJson(method));
+							}
+							matchIndex++;
 						}
 					}
 				}
@@ -337,7 +407,10 @@ public class JadxMcpServer {
 							break;
 						}
 						if (containsIgnoreCase(field.getFullName(), field.getName(), field.getRawName(), cmpQuery, ignoreCase)) {
-							matches.add(fieldToJson(field));
+							if (matchIndex >= offset) {
+								matches.add(fieldToJson(field));
+							}
+							matchIndex++;
 						}
 					}
 				}
@@ -345,6 +418,8 @@ public class JadxMcpServer {
 			JsonObject out = new JsonObject();
 			out.add("matches", matches);
 			out.addProperty("count", matches.size());
+			out.addProperty("offset", offset);
+			out.addProperty("has_more", matches.size() >= limit);
 			return out;
 		}
 	}
@@ -355,17 +430,25 @@ public class JadxMcpServer {
 		if (symbol == null) {
 			throw new IllegalArgumentException("Missing required argument: symbol");
 		}
+		int limit = getAsInt(argsObj, "limit", DEFAULT_LIMIT);
+		int offset = getAsInt(argsObj, "offset", 0);
 		synchronized (session) {
 			JavaNode node = resolveNode(session, symbol);
 			List<JavaNode> useIn = node.getUseIn();
+			int total = useIn.size();
+			int fromIdx = Math.min(offset, total);
+			int toIdx = Math.min(offset + limit, total);
 			JsonArray usage = new JsonArray();
-			for (JavaNode usedBy : useIn) {
+			for (JavaNode usedBy : useIn.subList(fromIdx, toIdx)) {
 				usage.add(nodeToJson(usedBy));
 			}
 			JsonObject out = new JsonObject();
 			out.add("symbol", nodeToJson(node));
 			out.add("usages", usage);
 			out.addProperty("count", usage.size());
+			out.addProperty("total", total);
+			out.addProperty("offset", offset);
+			out.addProperty("has_more", toIdx < total);
 			return out;
 		}
 	}
@@ -408,13 +491,16 @@ public class JadxMcpServer {
 		boolean ignoreCase = getAsBoolean(argsObj, "ignore_case", true);
 		String packagePrefix = getAsString(argsObj, "package_prefix", "");
 		int limit = getAsInt(argsObj, "limit", DEFAULT_LIMIT);
+		int offset = getAsInt(argsObj, "offset", 0);
+		boolean includeSource = getAsBoolean(argsObj, "include_source", false);
 		Pattern pattern = buildPattern(query, regex, ignoreCase);
 		synchronized (session) {
 			JsonArray results = new JsonArray();
+			Map<String, JavaClass> sourcesInWindow = new LinkedHashMap<>();
+			int matchCounter = 0;
+			boolean hasMore = false;
+			scanLoop:
 			for (JavaClass cls : session.allClasses()) {
-				if (results.size() >= limit) {
-					break;
-				}
 				if (!packagePrefix.isEmpty() && !cls.getPackage().startsWith(packagePrefix)) {
 					continue;
 				}
@@ -422,20 +508,36 @@ public class JadxMcpServer {
 				if (regex) {
 					Matcher matcher = pattern.matcher(code);
 					while (matcher.find()) {
-						results.add(codeMatchToJson(cls, code, matcher.start(), matcher.end()));
-						if (results.size() >= limit) {
-							break;
+						if (matchCounter >= offset) {
+							if (results.size() < limit) {
+								results.add(codeMatchToJson(cls, code, matcher.start(), matcher.end()));
+								if (includeSource) {
+									sourcesInWindow.put(cls.getFullName(), cls);
+								}
+							} else {
+								hasMore = true;
+								break scanLoop;
+							}
 						}
+						matchCounter++;
 					}
 				} else {
 					String src = ignoreCase ? code.toLowerCase(Locale.ROOT) : code;
 					String needle = ignoreCase ? query.toLowerCase(Locale.ROOT) : query;
 					int idx = src.indexOf(needle);
 					while (idx != -1) {
-						results.add(codeMatchToJson(cls, code, idx, idx + needle.length()));
-						if (results.size() >= limit) {
-							break;
+						if (matchCounter >= offset) {
+							if (results.size() < limit) {
+								results.add(codeMatchToJson(cls, code, idx, idx + needle.length()));
+								if (includeSource) {
+									sourcesInWindow.put(cls.getFullName(), cls);
+								}
+							} else {
+								hasMore = true;
+								break scanLoop;
+							}
 						}
+						matchCounter++;
 						idx = src.indexOf(needle, idx + Math.max(1, needle.length()));
 					}
 				}
@@ -443,6 +545,15 @@ public class JadxMcpServer {
 			JsonObject out = new JsonObject();
 			out.add("results", results);
 			out.addProperty("count", results.size());
+			out.addProperty("offset", offset);
+			out.addProperty("has_more", hasMore);
+			if (includeSource) {
+				JsonObject sources = new JsonObject();
+				for (Map.Entry<String, JavaClass> entry : sourcesInWindow.entrySet()) {
+					sources.addProperty(entry.getKey(), entry.getValue().getCode());
+				}
+				out.add("sources", sources);
+			}
 			return out;
 		}
 	}
@@ -451,56 +562,470 @@ public class JadxMcpServer {
 		DecompilerSession session = getSession(argsObj);
 		String query = requireString(argsObj, "query");
 		int limit = getAsInt(argsObj, "limit", DEFAULT_LIMIT);
+		int offset = getAsInt(argsObj, "offset", 0);
 		boolean regex = getAsBoolean(argsObj, "regex", false);
 		boolean ignoreCase = getAsBoolean(argsObj, "ignore_case", true);
+		boolean includeSource = getAsBoolean(argsObj, "include_source", false);
 		Set<String> kinds = getKinds(argsObj);
 		Pattern pattern = buildPattern(query, regex, ignoreCase);
 
 		synchronized (session) {
 			JsonArray matches = new JsonArray();
+			Map<String, JavaClass> sourcesInWindow = new LinkedHashMap<>();
+			int matchCounter = 0;
+			boolean hasMore = false;
+			symbolLoop:
 			for (JavaClass cls : session.allClasses()) {
-				if (matches.size() >= limit) {
-					break;
-				}
+				boolean classMatched = false;
 				if (kinds.contains("class") && matchesPattern(pattern, cls.getFullName(), cls.getName(), cls.getRawName(), query, ignoreCase)) {
-					matches.add(classToJson(cls));
-					if (matches.size() >= limit) {
-						break;
+					if (matchCounter >= offset) {
+						if (matches.size() < limit) {
+							matches.add(classToJson(cls));
+							classMatched = true;
+						} else {
+							hasMore = true;
+							break symbolLoop;
+						}
+					} else {
+						classMatched = true;
 					}
+					matchCounter++;
 				}
 				if (kinds.contains("method")) {
 					for (JavaMethod method : cls.getMethods()) {
-						if (matches.size() >= limit) {
-							break;
-						}
 						if (matchesPattern(pattern, method.getFullName(), method.getName(),
 								method.getMethodNode().getMethodInfo().getShortId(), query, ignoreCase)) {
-							matches.add(methodToJson(method));
+							if (matchCounter >= offset) {
+								if (matches.size() < limit) {
+									matches.add(methodToJson(method));
+									classMatched = true;
+								} else {
+									hasMore = true;
+									break symbolLoop;
+								}
+							} else {
+								classMatched = true;
+							}
+							matchCounter++;
 						}
 					}
 				}
 				if (kinds.contains("field")) {
 					for (JavaField field : cls.getFields()) {
-						if (matches.size() >= limit) {
-							break;
-						}
 						if (matchesPattern(pattern, field.getFullName(), field.getName(), field.getRawName(), query, ignoreCase)) {
-							matches.add(fieldToJson(field));
+							if (matchCounter >= offset) {
+								if (matches.size() < limit) {
+									matches.add(fieldToJson(field));
+									classMatched = true;
+								} else {
+									hasMore = true;
+									break symbolLoop;
+								}
+							} else {
+								classMatched = true;
+							}
+							matchCounter++;
 						}
 					}
 				}
 				if (kinds.contains("package")) {
 					JavaPackage pkg = cls.getJavaPackage();
 					if (pkg != null && matchesPattern(pattern, pkg.getFullName(), pkg.getRawFullName(), pkg.getName(), query, ignoreCase)) {
-						matches.add(packageToJson(pkg));
+						if (matchCounter >= offset && matches.size() < limit) {
+							matches.add(packageToJson(pkg));
+						}
+						matchCounter++;
 					}
+				}
+				if (includeSource && classMatched && !sourcesInWindow.containsKey(cls.getFullName())) {
+					sourcesInWindow.put(cls.getFullName(), cls);
 				}
 			}
 			JsonObject out = new JsonObject();
 			out.add("matches", matches);
 			out.addProperty("count", matches.size());
+			out.addProperty("offset", offset);
+			out.addProperty("has_more", hasMore);
+			if (includeSource) {
+				JsonObject sources = new JsonObject();
+				for (Map.Entry<String, JavaClass> entry : sourcesInWindow.entrySet()) {
+					sources.addProperty(entry.getKey(), entry.getValue().getCode());
+				}
+				out.add("sources", sources);
+			}
 			return out;
 		}
+	}
+
+	private JsonObject toolGetClassDeep(JsonObject argsObj) {
+		DecompilerSession session = getSession(argsObj);
+		String className = requireString(argsObj, "class_name");
+		String naming = getAsString(argsObj, "naming", "auto");
+		boolean includeUsages = getAsBoolean(argsObj, "include_usages", true);
+		boolean includeMethodCalls = getAsBoolean(argsObj, "include_method_calls", false);
+		boolean includeInnersSource = getAsBoolean(argsObj, "include_inners_source", false);
+		synchronized (session) {
+			JavaClass cls = requireClass(session, className, naming);
+			JsonObject out = new JsonObject();
+			out.add("class", classToJson(cls));
+			out.addProperty("source", cls.getCode());
+
+			JsonArray fields = new JsonArray();
+			for (JavaField field : cls.getFields()) {
+				fields.add(fieldToJson(field));
+			}
+			out.add("fields", fields);
+
+			JsonArray methods = new JsonArray();
+			for (JavaMethod method : cls.getMethods()) {
+				JsonObject m = methodToJson(method);
+				if (includeMethodCalls) {
+					JsonArray calls = new JsonArray();
+					for (JavaNode calledNode : method.getUsed()) {
+						calls.add(nodeToJson(calledNode));
+					}
+					m.add("calls", calls);
+					JsonArray calledFrom = new JsonArray();
+					for (JavaNode usedBy : method.getUseIn()) {
+						calledFrom.add(nodeToJson(usedBy));
+					}
+					m.add("called_from", calledFrom);
+					m.addProperty("calls_self", method.callsSelf());
+				}
+				methods.add(m);
+			}
+			out.add("methods", methods);
+
+			if (includeUsages) {
+				JsonArray usages = new JsonArray();
+				for (JavaNode usedBy : cls.getUseIn()) {
+					usages.add(nodeToJson(usedBy));
+				}
+				out.add("usages", usages);
+				out.addProperty("usages_count", usages.size());
+			}
+
+			JsonArray innerClasses = new JsonArray();
+			for (JavaClass inner : cls.getInnerClasses()) {
+				if (includeInnersSource) {
+					JsonObject innerObj = new JsonObject();
+					innerObj.add("class", classToJson(inner));
+					innerObj.addProperty("source", inner.getCode());
+					innerClasses.add(innerObj);
+				} else {
+					innerClasses.add(classToJson(inner));
+				}
+			}
+			out.add("inner_classes", innerClasses);
+			out.addProperty("inner_classes_count", innerClasses.size());
+
+			return out;
+		}
+	}
+
+	private JsonObject toolSearchAndResolve(JsonObject argsObj) {
+		DecompilerSession session = getSession(argsObj);
+		String query = requireString(argsObj, "query");
+		String kind = getAsString(argsObj, "kind", "all").toLowerCase(Locale.ROOT);
+		int limit = getAsInt(argsObj, "limit", 10);
+		boolean ignoreCase = getAsBoolean(argsObj, "ignore_case", true);
+		boolean includeSource = getAsBoolean(argsObj, "include_source", true);
+		String cmpQuery = ignoreCase ? query.toLowerCase(Locale.ROOT) : query;
+
+		synchronized (session) {
+			JsonArray matches = new JsonArray();
+			Map<String, JavaClass> sourceClasses = new LinkedHashMap<>();
+
+			if ("all".equals(kind) || "class".equals(kind)) {
+				JavaClass exact = session.resolveClass(query, "auto");
+				if (exact != null && matches.size() < limit) {
+					matches.add(classToJson(exact));
+					if (includeSource) {
+						sourceClasses.put(exact.getFullName(), exact);
+					}
+				}
+				for (JavaClass cls : session.allClasses()) {
+					if (matches.size() >= limit) {
+						break;
+					}
+					if (containsIgnoreCase(cls.getFullName(), cls.getRawName(), cls.getName(), cmpQuery, ignoreCase)) {
+						matches.add(classToJson(cls));
+						if (includeSource) {
+							sourceClasses.put(cls.getFullName(), cls);
+						}
+					}
+				}
+			}
+			if ("all".equals(kind) || "method".equals(kind)) {
+				for (JavaClass cls : session.allClasses()) {
+					if (matches.size() >= limit) {
+						break;
+					}
+					for (JavaMethod method : cls.getMethods()) {
+						if (matches.size() >= limit) {
+							break;
+						}
+						if (containsIgnoreCase(method.getFullName(), method.getName(),
+								method.getMethodNode().getMethodInfo().getShortId(), cmpQuery, ignoreCase)) {
+							matches.add(methodToJson(method));
+							if (includeSource) {
+								sourceClasses.put(cls.getFullName(), cls);
+							}
+						}
+					}
+				}
+			}
+			if ("all".equals(kind) || "field".equals(kind)) {
+				for (JavaClass cls : session.allClasses()) {
+					if (matches.size() >= limit) {
+						break;
+					}
+					for (JavaField field : cls.getFields()) {
+						if (matches.size() >= limit) {
+							break;
+						}
+						if (containsIgnoreCase(field.getFullName(), field.getName(), field.getRawName(), cmpQuery, ignoreCase)) {
+							matches.add(fieldToJson(field));
+							if (includeSource) {
+								sourceClasses.put(cls.getFullName(), cls);
+							}
+						}
+					}
+				}
+			}
+
+			JsonObject out = new JsonObject();
+			out.add("matches", matches);
+			out.addProperty("count", matches.size());
+			if (includeSource) {
+				JsonObject sources = new JsonObject();
+				for (Map.Entry<String, JavaClass> entry : sourceClasses.entrySet()) {
+					sources.addProperty(entry.getKey(), entry.getValue().getCode());
+				}
+				out.add("sources", sources);
+			}
+			return out;
+		}
+	}
+
+	private JsonObject toolGetAndroidManifest(JsonObject argsObj) {
+		DecompilerSession session = getSession(argsObj);
+		synchronized (session) {
+			ResourceFile manifest = findManifestResource(session);
+			ResContainer container = manifest.loadContent();
+			JsonObject out = new JsonObject();
+			out.add("resource", resourceToJson(manifest));
+			out.addProperty("content", extractResText(container));
+			return out;
+		}
+	}
+
+	private JsonObject toolGetMainActivity(JsonObject argsObj) {
+		DecompilerSession session = getSession(argsObj);
+		boolean includeSource = getAsBoolean(argsObj, "include_source", true);
+		synchronized (session) {
+			String manifestXml = extractResText(findManifestResource(session).loadContent());
+			String packageName = parsePackageName(manifestXml);
+			String activityName = parseMainActivityName(manifestXml, packageName);
+			if (activityName == null) {
+				throw new IllegalArgumentException("No launcher activity found in AndroidManifest.xml");
+			}
+			JsonObject out = new JsonObject();
+			out.addProperty("package_name", packageName);
+			out.addProperty("activity_class", activityName);
+			if (includeSource) {
+				JavaClass cls = session.resolveClass(activityName, "auto");
+				if (cls != null) {
+					out.add("class", classToJson(cls));
+					out.addProperty("source", cls.getCode());
+				} else {
+					out.addProperty("resolve_error", "Class not found in decompiled output: " + activityName);
+				}
+			}
+			return out;
+		}
+	}
+
+	private JsonObject toolGetAppClasses(JsonObject argsObj) {
+		DecompilerSession session = getSession(argsObj);
+		String packageName = getAsString(argsObj, "package_name", "");
+		boolean includeInners = getAsBoolean(argsObj, "include_inners", false);
+		boolean includeSource = getAsBoolean(argsObj, "include_source", false);
+		int limit = getAsInt(argsObj, "limit", DEFAULT_LIMIT);
+		int offset = getAsInt(argsObj, "offset", 0);
+		synchronized (session) {
+			if (packageName.isEmpty()) {
+				String manifestXml = extractResText(findManifestResource(session).loadContent());
+				packageName = parsePackageName(manifestXml);
+				if (packageName == null || packageName.isEmpty()) {
+					throw new IllegalArgumentException("Could not detect package name from AndroidManifest.xml — pass package_name explicitly");
+				}
+			}
+			List<JavaClass> allClasses = session.listClasses(includeInners);
+			JsonArray list = new JsonArray();
+			JsonObject sources = new JsonObject();
+			int matchIndex = 0;
+			for (JavaClass cls : allClasses) {
+				if (!cls.getPackage().startsWith(packageName)) {
+					continue;
+				}
+				if (isKnownLibraryPackage(cls.getPackage())) {
+					continue;
+				}
+				if (matchIndex >= offset && list.size() < limit) {
+					list.add(classToJson(cls));
+					if (includeSource) {
+						sources.addProperty(cls.getFullName(), cls.getCode());
+					}
+				}
+				matchIndex++;
+			}
+			JsonObject out = new JsonObject();
+			out.addProperty("package_name", packageName);
+			out.add("classes", list);
+			out.addProperty("count", list.size());
+			out.addProperty("total", matchIndex);
+			out.addProperty("offset", offset);
+			out.addProperty("has_more", offset + list.size() < matchIndex);
+			if (includeSource) {
+				out.add("sources", sources);
+			}
+			return out;
+		}
+	}
+
+	private JsonObject toolGetStringsResource(JsonObject argsObj) {
+		DecompilerSession session = getSession(argsObj);
+		synchronized (session) {
+			ResourceFile stringsRes = null;
+			for (ResourceFile resource : session.getDecompiler().getResources()) {
+				String name = resource.getOriginalName();
+				String deobf = resource.getDeobfName();
+				if ("res/values/strings.xml".equals(name) || "res/values/strings.xml".equals(deobf)
+						|| name.endsWith("/strings.xml") && name.contains("values/")) {
+					stringsRes = resource;
+					break;
+				}
+			}
+			if (stringsRes == null) {
+				for (ResourceFile resource : session.getDecompiler().getResources()) {
+					if (resource.getOriginalName().endsWith("strings.xml")) {
+						stringsRes = resource;
+						break;
+					}
+				}
+			}
+			if (stringsRes == null) {
+				throw new IllegalArgumentException("strings.xml not found in resources");
+			}
+			ResContainer container = stringsRes.loadContent();
+			JsonObject out = new JsonObject();
+			out.add("resource", resourceToJson(stringsRes));
+			out.addProperty("content", extractResText(container));
+			return out;
+		}
+	}
+
+	private ResourceFile findManifestResource(DecompilerSession session) {
+		for (ResourceFile resource : session.getDecompiler().getResources()) {
+			String name = resource.getOriginalName();
+			if ("AndroidManifest.xml".equals(name) || name.endsWith("/AndroidManifest.xml")) {
+				return resource;
+			}
+		}
+		for (ResourceFile resource : session.getDecompiler().getResources()) {
+			String deobf = resource.getDeobfName();
+			if (deobf != null && ("AndroidManifest.xml".equals(deobf) || deobf.endsWith("/AndroidManifest.xml"))) {
+				return resource;
+			}
+		}
+		throw new IllegalArgumentException("AndroidManifest.xml not found in resources — this may not be an APK/AAB file");
+	}
+
+	private String parsePackageName(String manifestXml) {
+		try {
+			DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
+			factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
+			DocumentBuilder builder = factory.newDocumentBuilder();
+			Document doc = builder.parse(new InputSource(new StringReader(manifestXml)));
+			return doc.getDocumentElement().getAttribute("package");
+		} catch (Exception e) {
+			return null;
+		}
+	}
+
+	private String parseMainActivityName(String manifestXml, String packageName) {
+		try {
+			DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
+			factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
+			DocumentBuilder builder = factory.newDocumentBuilder();
+			Document doc = builder.parse(new InputSource(new StringReader(manifestXml)));
+			NodeList activities = doc.getElementsByTagName("activity");
+			for (int i = 0; i < activities.getLength(); i++) {
+				Element activity = (Element) activities.item(i);
+				NodeList filters = activity.getElementsByTagName("intent-filter");
+				for (int j = 0; j < filters.getLength(); j++) {
+					Element filter = (Element) filters.item(j);
+					boolean hasMain = false;
+					boolean hasLauncher = false;
+					NodeList actions = filter.getElementsByTagName("action");
+					for (int k = 0; k < actions.getLength(); k++) {
+						String actionName = ((Element) actions.item(k)).getAttribute("android:name");
+						if ("android.intent.action.MAIN".equals(actionName)) {
+							hasMain = true;
+						}
+					}
+					NodeList categories = filter.getElementsByTagName("category");
+					for (int k = 0; k < categories.getLength(); k++) {
+						String catName = ((Element) categories.item(k)).getAttribute("android:name");
+						if ("android.intent.category.LAUNCHER".equals(catName)) {
+							hasLauncher = true;
+						}
+					}
+					if (hasMain && hasLauncher) {
+						String name = activity.getAttribute("android:name");
+						return resolveComponentName(name, packageName);
+					}
+				}
+			}
+		} catch (Exception ignored) {
+		}
+		return null;
+	}
+
+	private static String resolveComponentName(String name, String packageName) {
+		if (name == null || name.isEmpty()) {
+			return null;
+		}
+		if (name.startsWith(".")) {
+			return packageName + name;
+		}
+		if (name.contains(".")) {
+			return name;
+		}
+		return packageName + "." + name;
+	}
+
+	private static boolean isKnownLibraryPackage(String pkg) {
+		if (pkg == null) {
+			return false;
+		}
+		return pkg.startsWith("android.")
+				|| pkg.startsWith("androidx.")
+				|| pkg.startsWith("com.google.")
+				|| pkg.startsWith("kotlin.")
+				|| pkg.startsWith("kotlinx.")
+				|| pkg.startsWith("java.")
+				|| pkg.startsWith("javax.")
+				|| pkg.startsWith("org.apache.")
+				|| pkg.startsWith("com.squareup.")
+				|| pkg.startsWith("io.reactivex.")
+				|| pkg.startsWith("rx.")
+				|| pkg.startsWith("okhttp3.")
+				|| pkg.startsWith("retrofit2.")
+				|| pkg.startsWith("com.facebook.")
+				|| pkg.startsWith("com.amazonaws.")
+				|| pkg.startsWith("com.jakewharton.");
 	}
 
 	private JsonObject toolListResources(JsonObject argsObj) {
@@ -889,7 +1414,7 @@ public class JadxMcpServer {
 				obj("type", "object", "required", arr("session_id"), "properties", obj("session_id", obj("type", "string")))));
 		tools.add(tool("session_info", "Get session details",
 				obj("type", "object", "required", arr("session_id"), "properties", obj("session_id", obj("type", "string")))));
-		tools.add(tool("list_classes", "List classes in session",
+		tools.add(tool("list_classes", "List classes in session with optional filtering. Supports pagination via offset+limit. Returns total matching count and has_more flag.",
 				obj("type", "object", "required", arr("session_id"), "properties", obj(
 						"session_id", obj("type", "string"),
 						"package_prefix", obj("type", "string"),
@@ -897,11 +1422,13 @@ public class JadxMcpServer {
 						"regex", obj("type", "boolean"),
 						"ignore_case", obj("type", "boolean"),
 						"include_inners", obj("type", "boolean"),
-						"limit", obj("type", "integer")))));
-		tools.add(tool("get_class_source", "Get decompiled Java source for class",
-				obj("type", "object", "required", arr("session_id", "class_name"), "properties", obj(
+						"limit", obj("type", "integer"),
+						"offset", obj("type", "integer", "description", "Number of matching results to skip for pagination (default 0)")))));
+		tools.add(tool("get_class_source", "Get decompiled Java source for one or more classes. Pass class_name for a single class or class_names array for batch fetch.",
+				obj("type", "object", "required", arr("session_id"), "properties", obj(
 						"session_id", obj("type", "string"),
-						"class_name", obj("type", "string"),
+						"class_name", obj("type", "string", "description", "Single class full name (use this or class_names)"),
+						"class_names", obj("type", "array", "items", obj("type", "string"), "description", "List of class full names for batch fetch"),
 						"naming", obj("type", "string")))));
 		tools.add(tool("get_class_smali", "Get disassembled smali for class",
 				obj("type", "object", "required", arr("session_id", "class_name"), "properties", obj(
@@ -914,39 +1441,46 @@ public class JadxMcpServer {
 						"class_name", obj("type", "string"),
 						"method_short_id", obj("type", "string"),
 						"naming", obj("type", "string")))));
-		tools.add(tool("resolve_symbol", "Resolve class/method/field symbols",
+		tools.add(tool("resolve_symbol", "Resolve class/method/field symbols. Supports pagination via offset+limit.",
 				obj("type", "object", "required", arr("session_id", "query"), "properties", obj(
 						"session_id", obj("type", "string"),
 						"query", obj("type", "string"),
 						"kind", obj("type", "string"),
 						"ignore_case", obj("type", "boolean"),
-						"limit", obj("type", "integer")))));
-		tools.add(tool("find_usages", "Find incoming usages for symbol",
+						"limit", obj("type", "integer"),
+						"offset", obj("type", "integer", "description", "Number of matches to skip for pagination (default 0)")))));
+		tools.add(tool("find_usages", "Find incoming usages for symbol. Supports pagination via offset+limit. Returns total usage count.",
 				obj("type", "object", "required", arr("session_id", "symbol"), "properties", obj(
 						"session_id", obj("type", "string"),
-						"symbol", obj("type", "object")))));
+						"symbol", obj("type", "object"),
+						"limit", obj("type", "integer"),
+						"offset", obj("type", "integer", "description", "Number of usages to skip for pagination (default 0)")))));
 		tools.add(tool("find_method_calls", "Find incoming/outgoing method calls",
 				obj("type", "object", "required", arr("session_id", "class_name", "method_short_id"), "properties", obj(
 						"session_id", obj("type", "string"),
 						"class_name", obj("type", "string"),
 						"method_short_id", obj("type", "string"),
 						"naming", obj("type", "string")))));
-		tools.add(tool("search_code", "Search decompiled source text",
+		tools.add(tool("search_code", "Search decompiled source text. Set include_source=true to get full class sources for all matching classes in one call. Supports pagination via offset+limit with has_more flag.",
 				obj("type", "object", "required", arr("session_id", "query"), "properties", obj(
 						"session_id", obj("type", "string"),
 						"query", obj("type", "string"),
 						"regex", obj("type", "boolean"),
 						"ignore_case", obj("type", "boolean"),
 						"package_prefix", obj("type", "string"),
-						"limit", obj("type", "integer")))));
-		tools.add(tool("search_symbols", "Search class/method/field symbols",
+						"limit", obj("type", "integer"),
+						"offset", obj("type", "integer", "description", "Number of matches to skip for pagination (default 0)"),
+						"include_source", obj("type", "boolean", "description", "Include full decompiled source for each matching class, keyed by full class name")))));
+		tools.add(tool("search_symbols", "Search class/method/field symbols. Set include_source=true to include full class source for each match. Supports pagination via offset+limit.",
 				obj("type", "object", "required", arr("session_id", "query"), "properties", obj(
 						"session_id", obj("type", "string"),
 						"query", obj("type", "string"),
 						"kinds", obj("type", "array", "items", obj("type", "string")),
 						"regex", obj("type", "boolean"),
 						"ignore_case", obj("type", "boolean"),
-						"limit", obj("type", "integer")))));
+						"limit", obj("type", "integer"),
+						"offset", obj("type", "integer", "description", "Number of matches to skip for pagination (default 0)"),
+						"include_source", obj("type", "boolean", "description", "Include full decompiled source for each matched class, keyed by full class name")))));
 		tools.add(tool("list_resources", "List resources in session",
 				obj("type", "object", "required", arr("session_id"), "properties", obj(
 						"session_id", obj("type", "string"),
@@ -985,6 +1519,40 @@ public class JadxMcpServer {
 		tools.add(tool("plugins_uninstall", "Uninstall external jadx plugin",
 				obj("type", "object", "required", arr("plugin_id"), "properties", obj(
 						"plugin_id", obj("type", "string")))));
+		tools.add(tool("get_android_manifest", "Retrieve the decoded AndroidManifest.xml from the loaded APK/AAB. Returns the full manifest XML content.",
+				obj("type", "object", "required", arr("session_id"), "properties", obj(
+						"session_id", obj("type", "string")))));
+		tools.add(tool("get_main_activity", "Find the launcher Activity from AndroidManifest.xml and return its full class name and decompiled source in one call.",
+				obj("type", "object", "required", arr("session_id"), "properties", obj(
+						"session_id", obj("type", "string"),
+						"include_source", obj("type", "boolean", "description", "Include decompiled Java source of the main activity class (default: true)")))));
+		tools.add(tool("get_app_classes", "List all classes belonging to the app's own package (auto-detected from AndroidManifest.xml), filtering out known library packages. Optionally include full source.",
+				obj("type", "object", "required", arr("session_id"), "properties", obj(
+						"session_id", obj("type", "string"),
+						"package_name", obj("type", "string", "description", "Override the app package name instead of auto-detecting from manifest"),
+						"include_inners", obj("type", "boolean"),
+						"include_source", obj("type", "boolean", "description", "Include full decompiled source for each class (default: false)"),
+						"limit", obj("type", "integer"),
+						"offset", obj("type", "integer")))));
+		tools.add(tool("get_strings_resource", "Retrieve res/values/strings.xml content from the loaded APK. Useful for finding hardcoded strings, API endpoints, and keys.",
+				obj("type", "object", "required", arr("session_id"), "properties", obj(
+						"session_id", obj("type", "string")))));
+		tools.add(tool("get_class_deep", "Get full decompiled source, fields, methods, usages, and inner classes for a class in a single call. Avoids the need for separate get_class_source + find_usages + find_method_calls calls.",
+				obj("type", "object", "required", arr("session_id", "class_name"), "properties", obj(
+						"session_id", obj("type", "string"),
+						"class_name", obj("type", "string"),
+						"naming", obj("type", "string"),
+						"include_usages", obj("type", "boolean", "description", "Include all usages of this class (default: true)"),
+						"include_method_calls", obj("type", "boolean", "description", "Include calls and called_from for every method (default: false)"),
+						"include_inners_source", obj("type", "boolean", "description", "Include full source for each inner class (default: false, returns metadata only)")))));
+		tools.add(tool("search_and_resolve", "Search for symbols by name and immediately return their full decompiled class sources. Combines resolve_symbol + get_class_source in one call.",
+				obj("type", "object", "required", arr("session_id", "query"), "properties", obj(
+						"session_id", obj("type", "string"),
+						"query", obj("type", "string"),
+						"kind", obj("type", "string", "description", "Filter to: all, class, method, field (default: all)"),
+						"limit", obj("type", "integer", "description", "Max number of symbol matches to return (default: 10)"),
+						"ignore_case", obj("type", "boolean"),
+						"include_source", obj("type", "boolean", "description", "Include full source for each matched class (default: true)")))));
 		tools.sort(Comparator.comparing(t -> t.get("name").getAsString()));
 		JsonArray arr = new JsonArray();
 		tools.forEach(arr::add);
